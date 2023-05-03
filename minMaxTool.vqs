@@ -34,7 +34,7 @@ nCTs = ct.length;
 nPTs = nm.length;
 
 
-if (nCTs.length != nSeries/2){
+if (nSeries > (nCTs*2)){
     VQ.suspend('Multiple NMs for one CT - is this intended?')
 }
 
@@ -50,16 +50,24 @@ mv.setLayoutSize(1,nPTs);
 
 //set to sag. panel for all
 for (var k = 0; k < nPTs; k++){
-    mv.setPlane(0,k,1);
+    mv.setPlane(1,k,1);
 }
 
 
 // load 1st CT and 1st PT/NM in first panel -> etc for the rest
-for (var m = 0; m < nPTs; m++){
-        mv.setData(0,m,0,m);
-        mv.setData(0,m,1,m+nCTs);
+var counter = 0;
+for (var m = 0; m < nSeries; m++){
+    if (dm.getDesc(VQ.index(m),'Modality') != 'CT'){
+        counter+=1
+        mv.setData(0,counter-1,1,m);
+       
+    }
 
 }
+for (var i = 0; i < nPTs; i++){
+    mv.setData(0,i,0,ct.indexOf(nm[i]))
+}
+
 
 var rangesGood = false;
 
@@ -73,30 +81,30 @@ function fixRanges(){
     var ctRangeGood = false;
     var nmRangeGood = false;
     while (!ctRangeGood){
-        var ctMinMax = VQ.getValues('Set CT range',{'Min':'text','Max':'text'},modal=false);
+        var ctMinMax = VQ.getValues('Set CT range',{'Min':'text','Max':'text'},false);
         var flag = (parseFloat(ctMinMax['Min']) > parseFloat(ctMinMax['Max']));
         while (flag){
             VQ.showMessage('Please reset - max must be > min!')
-            ctMinMax = VQ.getValues('Set CT range',{'Min':'text','Max':'text'},modal=true);
+            ctMinMax = VQ.getValues('Set CT range',{'Min':'text','Max':'text'},false);
             flag = (parseFloat(ctMinMax['Min']) > parseFloat(ctMinMax['Max']));
         }
         for (var n = 0; n < nCTs; n++){
            dm.setMinMaxCache(VQ.index(n),parseFloat(ctMinMax['Min']),parseFloat(ctMinMax['Max']));
            }
-        ctRangeGood = VQ.askYesNoQuestion('Is CT range good to go?',true);
+        ctRangeGood = VQ.askYesNoQuestion('Is CT range good to go?',false);
        }
     while (!nmRangeGood){
-        var nmMinMax = VQ.getValues('Set NM range', {'Min':'text','Max':'text'},modal=false);
+        var nmMinMax = VQ.getValues('Set NM range', {'Min':'text','Max':'text'},false);
         var flag = (parseFloat(nmMinMax['Min']) > parseFloat(nmMinMax['Max']));
         while (flag){
             VQ.showMessage('Please reset - max must be > min!')
-            nmMinMax = VQ.getValues('Set NM range',{'Min':'text','Max':'text'},modal=true);
+            nmMinMax = VQ.getValues('Set NM range',{'Min':'text','Max':'text'},false);
             flag = (parseFloat(nmMinMax['Min']) > parseFloat(nmMinMax['Max']));
         }
         for (var k = nCTs; k < nSeries; k++){
         dm.setMinMaxCache(VQ.index(k),parseFloat(nmMinMax['Min']),parseFloat(nmMinMax['Max'])); 
            } 
-        nmRangeGood = VQ.askYesNoQuestion('Is NM range good to go?',true);
+        nmRangeGood = VQ.askYesNoQuestion('Is NM range good to go?',false);
        }
 
 }
