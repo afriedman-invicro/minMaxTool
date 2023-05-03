@@ -1,0 +1,102 @@
+// all the usual include functions
+#include "ipacs.vqs"
+#include "VQSTools.vqs"
+
+// clear all loaded data
+var dm = VQ.dataManager();
+var mw = VQ.mainWin();
+var mm = VQ.minMaxTool();
+dm.unloadData(VQ.index(0),-1);
+mw.setViewMode('Slice View','Navigation');
+
+// pause sctipt to allow user to load everything in -> wait for them to say "ok"
+VQ.suspend('Load in dataset(s), ok when done',false);
+
+//for now, assume they loaded same number of PT/NM as CT data sets
+var nSeries = dm.size();
+// set all the CTS to gray scale
+//set all the PT/NMs to nih_fire2 
+
+var ct = [];
+var nm = [];
+for (var j = 0; j < nSeries; j++){
+    if (dm.getDesc(VQ.index(j),'Modality') == 'CT'){
+        dm.setPalette(VQ.index(j),'gray'); 
+        ct.push(dm.getDesc(VQ.index(j),'StudyInstanceUID'));
+    }
+    else{
+        dm.setPalette(VQ.index(j),'nih_fire2');
+        nm.push(dm.getDesc(VQ.index(j),'StudyInstanceUID'))
+    }
+}
+
+nCTs = ct.length;
+nPTs = nm.length;
+
+
+if (nCTs.length != nSeries/2){
+    VQ.suspend('Multiple NMs for one CT - is this intended?')
+}
+
+
+// got to multiview
+mw.setViewMode('Multi View','Layout');
+var mv = VQ.currentView();
+
+
+//set up 1 row, number of columns = number of data sets
+mv.setLayoutSize(1,nPTs);
+
+
+//set to sag. panel for all
+for (var k = 0; k < nPTs; k++){
+    mv.setPlane(0,k,1);
+}
+
+
+// load 1st CT and 1st PT/NM in first panel -> etc for the rest
+for (var m = 0; m < nPTs; m++){
+        mv.setData(0,m,0,m);
+        mv.setData(0,m,1,m+nCTs);
+
+}
+
+var rangesGood = false;
+
+while (!rangesGood){
+    fixRanges();
+    rangesGood = VQ.askYesNoQuestion('CT/NM ranges good to go?',true);
+}
+dm.unloadData(VQ.index(0),-1)
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
+function fixRanges(){
+    var ctRangeGood = false;
+    var nmRangeGood = false;
+    while (!ctRangeGood){
+        var ctMinMax = VQ.getValues('Set CT range',{'Min':'text','Max':'text'},modal=false);
+        var flag = (parseFloat(ctMinMax['Min']) > parseFloat(ctMinMax['Max']));
+        while (flag){
+            VQ.showMessage('Please reset - max must be > min!')
+            ctMinMax = VQ.getValues('Set CT range',{'Min':'text','Max':'text'},modal=true);
+            flag = (parseFloat(ctMinMax['Min']) > parseFloat(ctMinMax['Max']));
+        }
+        for (var n = 0; n < nCTs; n++){
+           dm.setMinMaxCache(VQ.index(n),parseFloat(ctMinMax['Min']),parseFloat(ctMinMax['Max']));
+           }
+        ctRangeGood = VQ.askYesNoQuestion('Is CT range good to go?',true);
+       }
+    while (!nmRangeGood){
+        var nmMinMax = VQ.getValues('Set NM range', {'Min':'text','Max':'text'},modal=false);
+        var flag = (parseFloat(nmMinMax['Min']) > parseFloat(nmMinMax['Max']));
+        while (flag){
+            VQ.showMessage('Please reset - max must be > min!')
+            nmMinMax = VQ.getValues('Set NM range',{'Min':'text','Max':'text'},modal=true);
+            flag = (parseFloat(nmMinMax['Min']) > parseFloat(nmMinMax['Max']));
+        }
+        for (var k = nCTs; k < nSeries; k++){
+        dm.setMinMaxCache(VQ.index(k),parseFloat(nmMinMax['Min']),parseFloat(nmMinMax['Max'])); 
+           } 
+        nmRangeGood = VQ.askYesNoQuestion('Is NM range good to go?',true);
+       }
+
+}
