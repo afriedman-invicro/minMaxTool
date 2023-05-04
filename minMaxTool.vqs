@@ -1,4 +1,3 @@
-#include "ipacs.vqs"
 // clear all loaded data
 var dm = VQ.dataManager();
 var mw = VQ.mainWin();
@@ -124,11 +123,17 @@ function setUnits(){
                 if (dm.getDesc(VQ.index(k),'Modality') != 'CT'){
                     var injDose = repo.getInjectedDose(VQ.index(k));
                     if (injDose==-1) {
-                        var idErr = 'ID not found for index ' + k.toString() + '. Please input manually'
+                        var idErr = 'ID not found for index ' + k.toString() + '. Please input manually';
                         var dose = VQ.getValues(idErr,{'Injected Dose':'text'},false);
                         injDose = parseFloat(dose['Injected Dose']);}
-                    else {injDose = injDose;}
-                    VQ.showMessage(injDose)
+                    else {
+                        var idUnit = get_injected_dose_unit(VQ.index(k));
+                        var studyUnit = dm.getDesc(VQ.index(k),'Units');
+                        if (idUnit != studyUnit){
+                            VQ.debug('Converting ' + idUnit + ' to ' + studyUnit);
+                            injDose = IDUnitConversion(idUnit,studyUnit,injDose);
+                        }
+                    }
                     convertToPIDG(VQ.index(k),injDose);
                 }
             
@@ -144,7 +149,15 @@ function setUnits(){
                         var dose = VQ.getValues(idErr,{'Injected Dose':'text'},false);
                         injDose = parseFloat(dose['Injected Dose']);
                         }
-                    else {injDose = injDose;}
+                    else {
+                        var idUnit = get_injected_dose_unit(VQ.index(k));
+                        var studyUnit = dm.getDesc(VQ.index(k),'Units');
+                        if (idUnit != studyUnit){
+                            VQ.debug('Converting ' + idUnit + ' to ' + studyUnit);
+                            injDose = IDUnitConversion(idUnit,studyUnit,injDose);
+                        }
+
+                    }
                     var wt = repo.getWeight(VQ.index(k));
                     if (wt==-1) {
                         var wtErr = 'Weight not found for index ' + k.toString() + '. Please input manually'
@@ -177,3 +190,1450 @@ function convertToSUV(idx,dose,weight){
     VQ.currentOp().multScalar(idx,weight*1000/(vox_size*dose));
 
 }
+
+function get_injected_dose_unit(idx){
+    //get the ipacs info first
+    info = parseIPACSFromDesc(idx)
+    this_repo = new iPACS(info['url'].replace('ipacs://','ipacss://'),info['prj']); //assume 443 connection
+
+    //look for study units
+    res = VQ.queryDataPoints(this_repo.dcmRep,'projects','','StudyUnits')
+
+    if (res.length==0){
+        VQ.showMessage('No Study Units datapoint found')
+    }
+    else{
+        return res[0]['injdoseunit']
+    }
+
+}
+
+
+function IDUnitConversion(injDoseUnit,imgUnit,injDose){
+    if (injDoseUnit=='MBq' && imgUnit=='kBq'){
+        injDose *= 1000;
+    }
+    else if (injDoseUnit=='MBq' & imgUnit=='uCi'){
+        injDose *= 27;
+    }
+    else if (injDoseUnit=='kBq' & imgUnit=='MBq'){
+        injDose /= 1000;
+    }
+    else if (injDoseUnit=='kBq' & imgUnit=='uCi'){
+        injDose *= 0.027;
+    }
+    else if (injDoseUnit=='uCi' & imgUnit=='kBq'){
+        injDose *= 37;
+    }
+    else if(injDoseUnit=='uCi' & imgUnit=='MBq'){
+        injDose *= 0.037;
+    }
+   return injDose
+
+}
+
+function parseIPACSFromDesc(idx) {
+
+    // Parse IPACS repository of loaded data
+    var desc = dm.getDesc(idx, '__repository_url');
+    var repoUrl = desc.match(/^(.*)\/\/.*@(.*):[0-9]*(\/.*)/);
+    var out = {
+        'url': repoUrl[1] + '//' + repoUrl[2],
+        'prj': repoUrl[3],
+    };
+
+    return out
+}
+
+
+
+function iPACS(){
+    var ipacsversion = '1.31';
+    // Function to standardize thrown errors
+    // Displays message and quits. Should only be called from catch blocks
+    this.showError = function(err,fn){
+        VQ.debug(fn + ' ERROR: ' + err);
+        VQ.debug(this.serverMode);
+        if (this.serverMode){
+            VQ.debug(fn + ' ERROR: ' + err);
+            VQ.quit();
+        }
+        else{
+        VQ.showMessage(fn + ' ERROR: ' + err);
+        VQ.abort();
+        }
+    }
+
+    try{
+        VQ.debug('ipacs.vqs version: ' + ipacsversion);
+        if (arguments.length < 1 || arguments.length > 3)
+            throw "Usage: var repository = new iPACS(address,[project path])";
+        if (arguments.length == 3){
+            this.serverMode = arguments[2];
+        }
+        
+        var address = arguments[0];
+        
+        var dcmrep = VQ.dcmRep(address);
+
+        var dbgflg = false;
+
+        if (!dcmrep.ping())
+        {
+            throw "dcmRep ping failed. Check IPACS address";
+        }
+
+        if (address.split(':')[0] == 'folder'){
+            VQ.debug('Local Data detected');
+        }
+        else{
+            var path = arguments[1];
+
+            var projects = dcmrep.getProjectList();
+            if (!containsstr(path,projects))
+            {
+                throw "Project not found. Check Project name.";
+            }
+            dcmrep.setProject(path);
+        }
+        this.dcmRep = dcmrep;
+        this.CurrentStudy = '';
+        this.repository_url = address;
+        this.project = path;
+        this.CurrentSeries = '';
+        Object.defineProperty(this,"CurrentSeries",{writable:true});
+        Object.defineProperty(this,"dcmRep",{writable:true});
+        Object.defineProperty(this,"CurrentStudy",{ writable:true});
+        
+    }
+    catch(err) {   
+        this.showError(err,'iPACS');
+    }
+
+    // Sets debug flag
+    // flag == true outputs all debug code
+    // flag == false supresses all code
+    this.setDebug = function(flag) {
+        dbgflg = flag;
+        return;
+    }
+
+    // Returns a list of all studies found that match nfilt and pidfilt. Follows same rules as VQ.queryStudies, just checks for existence
+    // accepted arguments: -namefilter, -idfilter, -sort, -datestart,-dateend,-descfilter 
+    // Usage: this.getStudies(argument1,value1,argument2...)
+    // for sorting method, enter a property to sort for
+    // defaults: -namefilter *
+    //           -idfilter *
+    //           -descfilter * (This is study description)
+    //           -sort false
+    //           -datestart No filtering
+    //           -dateend No filtering
+    // -datestart (yyyymmdd) Finds studies from this date on
+    // -dateend (yyyymmdd) Finds studies up until this date
+    // 
+    this.getStudies = function() {
+        try{
+            if (dbgflg){
+                VQ.debug(arguments)
+                for (var i = 0; i<arguments.length; i++){
+                    VQ.debug(arguments[i]);
+                }
+            }
+
+            if (arguments.length % 2)
+                throw "Accpeted arguments -namefilter,-idfilter,-descfilter,-sort,-datestart,-dateend" 
+            var idx = 0;
+            nfilt = '*';
+            pidfilt = '*';
+            descfilt = '*';
+            srt = false;
+            tdstart = false;
+            tdend = false;
+            while (idx < arguments.length){
+                if (arguments[idx] == '-namefilter'){
+                    nfilt = arguments[idx+1];
+                }
+                else if (arguments[idx] == '-idfilter'){
+                    pidfilt = arguments[idx+1];
+                }
+                else if (arguments[idx] == '-descfilter'){
+                    descfilt = arguments[idx+1];
+                }
+                else if (arguments[idx] == '-sort'){
+                    srt = true;
+                    stype = arguments[idx+1];
+                }
+                else if (arguments[idx] == '-datestart'){
+                    if (dbgflg) VQ.debug("Filtering -datestart");
+                    tdstart = true;
+                    dstart = arguments[idx+1];
+                    if (dstart.length != 8) throw "Date must be in the format YYYYMMDD"
+                }
+                else if (arguments[idx] == '-dateend'){
+                    tdend = true;
+                    dend = arguments[idx+1]
+                    if (dend.length != 8) throw "Date must be in the format YYYYMMDD"
+                }
+                else {
+                    throw "Accepted arguments -namefilter, '-idfilter','-sort','-datestart','-dateend'"
+                }
+                // increment by 2
+                idx = idx +2;
+            }
+            
+
+            var studies = VQ.queryStudies(this.dcmRep,nfilt,pidfilt,'*',descfilt);
+            if (!studies)
+            {
+                throw "No studies found... try new filter";
+            }
+        }
+        catch(err){
+            this.showError(err,'getStudies()');
+        }
+
+        // Put in date filtering here
+        if (dbgflg) VQ.debug('Date filtering: '); 
+        if (tdstart)
+            studies = filtDates(studies,dstart,false);
+        if (tdend)
+            studies = filtDates(studies,dend,true);
+
+
+
+        if (srt)
+            studies = sortList(studies,stype);
+        return studies;
+    }
+
+
+
+    // Accepts study object or study UID
+    // Really only used internally
+    this.setStudy = function(study) {
+        try{
+            var studies = VQ.queryStudies(this.dcmRep,'*','*');
+            for (var i = 0; i < studies.length; i++){
+                if (studies[i].StudyInstanceUID == study){
+                    if (dbgflg) VQ.debug("Set Current Study: " + this.CurrentStudy.StudyInstanceUID);
+                    this.CurrentStudy = studies[i];
+                    return;
+                }
+                if (studies[i].StudyInstanceUID == study.StudyInstanceUID){
+                    this.CurrentStudy = studies[i]
+                    if (dbgflg) VQ.debug("Set Current Study: " + this.CurrentStudy.StudyInstanceUID);
+                    return;
+                }
+            }
+            throw "No matching study found";
+        }
+        catch(err){
+            this.showError(err,'setStudy()');
+        }
+    }
+
+
+
+
+    // Finds all series within current study
+    // Automatically sorts list of returned series
+    // Currently accepted arguments (optional):
+    //          -modality
+    //          -seriesdescription: accepts bash style wildcards (*) 
+    // Example usage repo.getSeries(studies[i],'-modality','CT','-seriesdescription','*focused*')
+    this.getSeries = function(){
+        try{
+            if (dbgflg) VQ.debug(arguments);
+            
+            sdec = '';
+            modality = '';
+            // Odd number of arguments required
+            if (arguments.length % 2 == 0) throw "Usage: getSeries(study,arguments)";
+            // Check to make sure first argument is study object
+            if (arguments[0].StudyInstanceUID){
+                this.setStudy(arguments[0].StudyInstanceUID);
+            }
+            else throw "First argument is not a valid study object";
+            for (var j = 1; j < arguments.length; j++)  
+            {
+                if (dbgflg) VQ.debug(arguments[j]);
+                if (arguments[j] == '-modality')   modality = arguments[j+1];
+                if (arguments[j] == '-seriesdescription') sdec = arguments[j+1];
+            }
+            if (this.CurrentStudy == '') throw "No study selected. Have you called setStudy()?";
+            if (dbgflg){
+                VQ.debug('modality ' + modality)
+                VQ.debug('sdec ' + sdec);
+                VQ.debug("Get Current Study: " + this.CurrentStudy.StudyInstanceUID);
+            }
+            var series = VQ.querySeries(this.dcmRep,this.CurrentStudy.StudyInstanceUID);
+            var oseries = new Array();
+            for (var i = 0; i < series.length; i++){
+                
+                if (modality == '' || modality == series[i].Modality)
+                {
+                    if (sdec == '' || wildcardMatch(series[i].SeriesDescription,sdec)){
+                        oseries.push(series[i])
+                    }
+                }
+
+
+
+            }
+            if ((!series || oseries.length == 0) && dbgflg)
+                VQ.debug('WARNING: Empty series returned for ' + this.CurrentStudy.PatientsName + ' ' + this.CurrentStudy.PatientID + '. If not intentional please check you filters');
+        }
+        catch(err){
+            this.showError(err,'getSeries()');
+        }
+        // Default sorting
+        // Sorting order of preference: modality, patient id, patient name, series time, series name
+        oseries.sort(seriesSort); 
+        return oseries;
+    }
+
+   
+   
+   
+    // Sets series as the Current Series. Accepts series object or series UID
+    // Mainly an internal method
+    this.setSeries = function(series) {
+        try{
+            var tseries = VQ.querySeries(this.dcmRep,this.CurrentStudy.StudyInstanceUID);
+            
+            for (var i = 0; i < tseries.length; i++) { 
+                if (tseries[i].SeriesInstanceUID == series || tseries[i].SeriesInstanceUID == series.SeriesInstanceUID) {
+                    this.CurrentSeries = tseries[i];
+                    return;
+                }
+            }
+            throw "No matching series found.";
+        }
+        catch(err){
+            this.showError(err,'setSeries()');
+        }
+
+    }
+
+    // Downloads images for the the current series, optionally takes a series object as an argument
+    // Appends the data to the already loaded data
+    // Argument preceeds current series. Always uses current study
+    // Also loads the data in vivoquant
+    // Update: 3rd argument (idx) is now a boolean. True to append, false to load to reference
+    // Update: now takes optional arguments after the three required arguments:
+    //          -open: boolean on whether to open the images or just download them (only comes into effect if using typefilter)
+    //          -typefilter: filter on ImageType (*RECON* only gets the RECON)
+    //                      Note: it filters on the DICOM dump, not the Data Browser response
+    this.getImages = function() {   
+        try {
+            var dm = VQ.dataManager();
+            if (dbgflg) VQ.debug('getImages argument: ' + arguments);
+            var open = true;
+            var doFlter = false;
+            var typefltr = '*';
+            var isofltr = '*';
+            switch(arguments.length){
+                case 0:
+                case 1:
+                case 2:
+                    throw "Usage: getImages(study,series,idx,[optional arguments])";
+                    break;
+                case 3:
+                    this.setStudy(arguments[0]);
+                    this.setSeries(arguments[1]);
+                    idx = arguments[2];
+                    break
+                default:
+                    this.setStudy(arguments[0]);
+                    this.setSeries(arguments[1]);
+                    idx = arguments[2];
+
+                    if (arguments.length % 2 == 0)throw "Usage: getImages(study,series,idx,[optional arguments])"
+                    // Since we are here we know that length>3
+                    var i = 3;
+                    while (i < arguments.length){
+                        if (arguments[i] == '-open')
+                            open = arguments[i+1];
+                        if (arguments[i] == '-typefilter'){
+                            typefltr = arguments[i+1];
+                            doFlter = true;
+                            if (dbgflg) VQ.debug('Doing name filtering on images');
+                        }
+                        if (arguments[i] == '-isofilter'){
+                            isofltr = arguments[i+1];
+                            doFilter = true;
+                            if (dbgflg) VQ.debug('Doing isotope filtering on images');
+                        }
+                        i = i+2;
+                    }
+                    break;
+            }
+            
+
+            if (doFlter){
+                if (idx)
+                    idx_to_load = dm.size();
+                else
+                    idx_to_load = 0;
+                if (dbgflg) VQ.debug('Filtering requested. Downloading images before opening');
+                var quim = VQ.queryImages(this.dcmRep,(this.CurrentStudy).StudyInstanceUID,(this.CurrentSeries).SeriesInstanceUID);
+                // Do flitering
+                if (dbgflg) VQ.debug('Query images: ' + quim);
+                // ImageType seems to be the best one to filter by
+                var im = [];
+                for (var i = 0; i < quim.length; i++){
+                    // Query metadata data point
+                    var res = VQ.queryDataPoints(this.dcmRep,'images',quim[i].SOPInstanceUID,'metadata');
+                    if (wildcardMatch(quim[i]['ImageType'],typefltr) && wildcardMatch(res[0]['InjectedDoseIsotope'],isofltr)){
+                        // Download the image if it matches
+                        var tmpim =VQ.downloadImages(this.dcmRep,(this.CurrentStudy).StudyInstanceUID,(this.CurrentSeries).SeriesInstanceUID,quim[i].SOPInstanceUID);
+                        im.push(tmpim);
+                    }
+                }
+
+                if (!im) throw "Image did not download correctly\n" + (this.CurrentStudy).StudyInstanceUID + " " + (this.CurrentSeries).SeriesInstanceUID;
+                // Open all the images in im, starting at idx            
+                if (dbgflg) VQ.debug('Number of images downloaded: ' + im.length);
+                if (open){ 
+                    dm.openDat(idx_to_load,im);
+                    if (dbgflg) VQ.debug('Using openDat to open the downloaded image');
+                    var dispName = this.dcmRep.get('displayedName');
+                    if (dispName && dispName.length) {
+                        dm.setDesc(dm.size()-1,"__repository",dispName);
+                    } else {
+                        dm.setDesc(dm.size()-1,"__repository","VQScriptRep");
+                    }
+                    dm.setDesc(dm.size()-1,"__repository_url",this.repository_url);
+                    dm.setDesc(dm.size()-1,"__project",this.project);
+                }
+            }
+            else {
+                if (dbgflg) VQ.debug('Using dicomBrowserLoad to open data');
+                var old_size = dm.size();
+                VQ.dicomBrowserLoad(this.dcmRep,(this.CurrentStudy).StudyInstanceUID,(this.CurrentSeries).SeriesInstanceUID,idx);
+                var dispName = this.dcmRep.get('displayedName');
+                if (dispName && dispName.length) {
+                    dm.setDesc(dm.size()-1,"__repository",dispName);
+                } else {
+                    dm.setDesc(dm.size()-1,"__repository","VQScriptRep");
+                }
+                dm.setDesc(dm.size()-1,"__repository_url",this.repository_url);
+                dm.setDesc(dm.size()-1,"__project",this.project);
+
+            }
+            
+        }
+        catch (err){
+            this.showError(err,'getImages()'); 
+        }
+        return im;
+
+    }
+
+
+    // DEPRECIATED: use this.getROIs() for ROI retrevial
+    // Downloads the latest ROIs from the ipacs (implements commonfuncs.vqs find_latest function). Copied below so commonfuncs doesn not need to be included -- temporary but may change later
+    // Takes list of ROIs as an argument (mandatory)
+    // Takes path to save tmp file as second argument (optional)
+    //
+    this.getROI = function(){
+        try{
+            if (dbgflg) VQ.debug('getROI argument: ' + arguments);
+            switch (arguments.length){
+                case 1:
+                    var roilist = arguments[0];
+                    var path = 'roi.rmha';
+                    break;
+                case 2:
+                    var roilist = arguments[0];
+                    var path = arguments[1];
+                    break;
+                default:
+                    throw "Usage: getROI(roilist,[temp save path])";
+            }
+
+            var dm = VQ.dataManager();
+            // Set repository options
+            var dispName = this.dcmRep.get('displayedName');
+            if (dispName && dispName.length) {
+                dm.setDesc(0,"__repository",dispName);
+            } else {
+                dm.setDesc(0,"__repository","VQScriptRep");
+            }
+            dm.setDesc(0,"__repository_url",this.repository_url);
+            dm.setDesc(0,"__project",this.project);
+
+            var uid = dm.getDesc(0,"sopinstanceuid");
+            if (dbgflg) VQ.debug('sopinstanceuid ' + uid);
+            var res = VQ.queryDataPoints(this.dcmRep,"images",uid,"quantification");
+            if (dbgflg) VQ.debug('res length ' + res.length);
+            var resfinal = find_latest(res);
+            var rois_to_use = [];
+            var rois_to_lose = [];
+            var wd_idx = [];
+
+            if (dbgflg) VQ.debug('resfinal length ' + resfinal.length);
+
+            for (r in resfinal){
+                if (dbgflg) VQ.debug('Final ROIs selected :' + resfinal[r]["name"]);
+                rois_to_lose.push(parseFloat(resfinal[r]["roiid"]));
+                if(roilist.indexOf(resfinal[r]["name"]) > -1){
+                    rois_to_use.push(parseFloat(resfinal[r]["roiid"]));
+                    wd_idx.push(parseFloat(r));
+                }
+            }
+            var wd = VQ.webDisk(this.repository_url);
+            if (dbgflg) VQ.debug('rois_to_use length ' + rois_to_use.length);
+            for (rt in rois_to_use){
+                var id = wd_idx[rt];
+                if (dbgflg) VQ.debug('ROI: ' + resfinal[id]["name"]);
+                var roifile = resfinal[id]["filename"];
+                if (dbgflg) VQ.debug('ROIFILE: ' + roifile);
+                if (!roifile.match("^/")) {
+                    roifile = '/projects' + this.dcmRep.project() + '/' + roifile;
+                }
+                if (dbgflg) VQ.debug('ROIFile: ' + roifile);
+                var resGet = wd.get(roifile,path);
+                if (!resGet) throw "Download of ROI failed\nDo you have write access at " + path + "?";
+            }
+            VQ.mainWin().setViewMode("Slice View","3D ROI Tool");
+            VQ.currentOp().loadROI(path);
+        }
+        catch(error){
+            this.showError(error,'getROI()');
+        }
+    }
+
+
+    // Updated function for ROI retreval. Now takes 3 optional arguments
+    // -names: list of ROI names (all must be found for a file to load)
+    // -creator: string of the creator of the ROI datapoint
+    // -savepath: path to where you want to save the temporary roi file (ex C:\tmp\tmp.rmha)
+    // -datestart: oldest date to grab an ROI. Format: yyyymmdd
+    // -dateend: most recent to grab ROI, format: yyyymmdd. See getStudies for more detailed useage
+    // -setid: [GREEDY] downloads and opens the ROI that matches the setid. Ignores all other options except savepath
+    // Example usage: repo.getROIs('-creator','anovicki','-names',['Heart','Muscle'],'-savepath','C:\tmp.rmha'
+    // All arguments are optional and order does not matter
+    this.getROIs = function(){
+        try{
+            if (arguments.length % 2) throw "Must have even number of arguments: accepted options: -names, -creator, -savepath, -datestart, -datestart"
+
+            var idx = 0;
+            // Default argument values
+            var path = VQ.getCache() + '/tmp.rmha';
+            var fltnames = false;
+            var fltcreator = false;
+            var tdstart = false;
+            var tdend = false;
+            var dstart = '20000101';
+            var dend = '20281231';
+            var doSetID = false;
+            var setId = '{}';
+            while (idx < arguments.length)
+            {
+                if (dbgflg) VQ.debug('idx: ' + idx);
+                if (arguments[idx] == '-names'){
+                    fltnames = true;
+                    roilist = arguments[idx+1];
+                }
+                else if (arguments[idx] == '-creator'){
+                    fltcreator = true;
+                    cname = arguments[idx+1];
+                }
+                else if (arguments[idx] == '-savepath'){
+                    path = arguments[idx+1];
+                }
+                else if (arguments[idx] == '-datestart'){
+                    tdstart = true;
+                    dstart = arguments[idx+1];
+                    if (dstart.length != 8) throw "Date must be in the format YYYYMMDD"
+                }
+                 else if (arguments[idx] == '-dateend'){
+                    tdend = true;
+                    dend = arguments[idx+1];
+                    if (dend.length != 8) throw "Date must be in the format YYYYMMDD"
+                }   
+                else if (arguments[idx] == '-setid'){
+                    doSetID = true;
+                    setId = arguments[idx+1];
+   		}
+                else{
+                    throw "Improper usage, accepted arguments are -names, -creator, -savepath"
+                }
+                idx = idx + 2;
+            }
+
+            // Begin getROIs script
+            //
+            var dm = VQ.dataManager();
+            // Set repository options
+            var dispName = this.dcmRep.get('displayedName');
+            if (dispName && dispName.length) {
+                dm.setDesc(0,"__repository",dispName);
+            } else {
+                dm.setDesc(0,"__repository","VQScriptRep");
+            }
+            dm.setDesc(0,"__repository_url",this.repository_url);
+            dm.setDesc(0,"__project",this.project);
+            
+            // Get data points
+            var uid = dm.getDesc(0,"sopinstanceuid");
+            if (dbgflg) VQ.debug('sopinstanceuid ' + uid);
+            var res = VQ.queryDataPoints(this.dcmRep,"images",uid,"quantification");
+            if (dbgflg) VQ.debug('res length ' + res.length);
+
+            fnames = new Array()
+            // Make array of filenames
+            for (var i=0; i < res.length; i++){
+                fnames.push(res[i].filename);
+            }
+
+            // Find unique filenames
+            ufnames = unique(fnames);
+            rlist = new Array(ufnames.length)
+
+            // Make array of roi objects - construct with roi filename 
+            for (var i = 0; i < rlist.length; i ++){
+                rlist[i] = new roi_obj(ufnames[i]); 
+            }
+            // Populate roi object list
+            // 
+            // Add elements to object array (can be cleaned up) 
+            for (var i=0; i < res.length; i++){
+                for (var j =0; j < rlist.length; j++){
+                    if (res[i].filename == rlist[j].filename){
+                        // Add creator if none existed
+                        if (!rlist[j].creator)
+                            rlist[j].creator = res[i].creator;
+                        // Add timestamp -- timestamp might be different from DP to DP, but there shouldn't be overlap from one roi file to the next (aka they should all be within 2 mins of each other)
+                        if (!rlist[j].timestamp)
+                            rlist[j].timestamp = res[i].timestamp;
+                        if (rlist[j].setid == '{}')
+                            rlist[j].setid = "" + res[i].setid;
+                        // Add roi name append list already there
+                        (rlist[j].names).push(res[i].name);
+                    }
+                }
+            }
+            // Apply filters:
+            //
+            if (doSetID){
+                for (var i = 0 ;i < rlist.length; i++){
+                    if (rlist[i].setid == setId || rlist[i].setid == '{' + setId + '}'){
+                        rlist = rlist.splice(i,1);
+                        break
+                    }
+                }
+            }
+            else{
+                if (fltnames)
+                    rlist = filterName(rlist,roilist);
+                if (fltcreator)
+                    rlist = filterCreator(rlist,cname);
+
+                // Put in date filtering here
+                if (dbgflg && (tdstart || tdend)) VQ.debug('Date filtering: '); 
+                if (tdstart)
+                    rlist = filtDates_roi(rlist,dstart,false);
+                if (tdend)
+                    rlist = filtDates_roi(rlist,dend,true);
+            }
+
+
+
+            // Get most recent roi
+            var curr_roi = find_latest_roi(rlist);
+
+            if (!curr_roi){
+                if (dbgflg) VQ.debug('Error: No ROI found that matches the filters');
+                return false;
+            }
+
+            // Okay now download roi and load it into VQ
+            var wd = VQ.webDisk(this.repository_url);
+            var roifile = curr_roi["filename"];
+            if (dbgflg) VQ.debug('ROIFILE: ' + roifile);
+            //if (!roifile.match("^/")) {
+            if (roifile.slice(0,1) != '/'){
+                roifile = '/projects' + this.dcmRep.project() + '/' + roifile;
+            }
+            if (dbgflg) VQ.debug('ROIFile: ' + roifile);
+            var resGet = wd.get(roifile,path);
+            if (!resGet) throw "Download of ROI failed\nDo you have write access at " + path + "?";
+            
+            VQ.mainWin().setViewMode("Slice View","3D ROI Tool");
+            VQ.currentOp().loadROI(path);
+        } // End try block
+        catch(error){
+            this.showError(error,'getROIs'); 
+        }
+        return curr_roi;
+    } // End function
+
+
+
+    // Function to merge ROIs from different ROI files on the iPACS. ROIlist is required 
+    // Downloads the most recent version of each ROI found in array supplied by -names argument
+    // and merges them together
+    //
+    // Required arguments -names
+    // Optional arguments -creator,
+    //                    -savepath (default: tmp.rmha)
+    //                    -exactlist (default: true) If true, deletes all Rois not in ROI list
+    this.mergeROIs = function(){
+        try{
+            if (arguments.length % 2) throw "Must have even number of arguments: accepted options: -names, -creator, -savepath, -exactlist"
+
+            var idx = 0;
+            // Default argument values
+            path = VQ.getCache()  + '/tmp.rmha';
+            fltnames = false;
+            fltcreator = false;
+            exactlist = true;
+            while (idx < arguments.length)
+            {
+                VQ.debug('idx: ' + idx);
+                if (arguments[idx] == '-names'){
+                    fltnames = true;
+                    roilist = arguments[idx+1];
+                }
+                else if (arguments[idx] == '-creator'){
+                    fltcreator = true;
+                    cname = arguments[idx+1];
+                }
+                else if (arguments[idx] == '-savepath'){
+                    path = arguments[idx+1];
+                }
+                else if (arguments[idx] == '-exactlist'){
+                    exactlist = arguments[idx+1];
+                }
+                else{
+                    throw "Improper usage, accepted arguments are -names, -creator, -savepath, -exactlist"
+                }
+                idx = idx + 2;
+                
+            }
+            // Names is required
+            if (!fltnames){
+                throw "-names argument is required"
+            }
+
+            // Begin getROIs script
+            //
+            var dm = VQ.dataManager();
+            // Set repository options
+            var dispName = this.dcmRep.get('displayedName');
+            if (dispName && dispName.length) {
+                dm.setDesc(0,"__repository",dispName);
+            } else {
+                dm.setDesc(0,"__repository","VQScriptRep");
+            }
+            dm.setDesc(0,"__repository_url",this.repository_url);
+            dm.setDesc(0,"__project",this.project);
+            
+            // Get data points
+            var uid = dm.getDesc(0,"sopinstanceuid");
+            if (dbgflg) VQ.debug('sopinstanceuid ' + uid);
+            var res = VQ.queryDataPoints(this.dcmRep,"images",uid,"quantification");
+            if (dbgflg) VQ.debug('res length ' + res.length);
+
+            fnames = new Array()
+            // Make array of filenames
+            for (var i=0; i < res.length; i++){
+                fnames.push(res[i].filename);
+            }
+
+            // Find unique filenames
+            ufnames = unique(fnames);
+            rlist = new Array(ufnames.length)
+
+            // Make array of roi objects - construct with roi filename 
+            for (var i = 0; i < rlist.length; i ++){
+                rlist[i] = new roi_obj(ufnames[i]); 
+            }
+            // Populate roi object list
+            // 
+            // Add elements to object array (can be cleaned up) 
+            for (var i=0; i < res.length; i++){
+                for (var j =0; j < rlist.length; j++){
+                    if (res[i].filename == rlist[j].filename){
+                        // Add creator if none existed
+                        if (!rlist[j].creator)
+                            rlist[j].creator = res[i].creator;
+                        // Add timestamp -- timestamp might be different from DP to DP, but there shouldn't be overlap from one roi file to the next (aka they should all be within 2 mins of each other)
+                        if (!rlist[j].timestamp)
+                            rlist[j].timestamp = res[i].timestamp;
+                        // Add roi name append list already there
+                        (rlist[j].names).push(res[i].name);
+                    }
+                }
+            }
+            
+            if (dbgflg){
+                VQ.debug('rlist:');
+                /////// PRINT OUT
+                for (var i=0; i < rlist.length;i++){
+                    VQ.debug(rlist[i].filename + '**__**' + rlist[i].names);
+                }
+                /////////////////
+            }
+
+
+            // Put in meat of the merge script here
+            if (fltcreator)
+                rlist = filterCreator(rlist,cname);
+
+            // Filter names is a little more involved here
+            frois = new Array();
+            froilist = new Array();
+            for (var i=0; i < roilist.length; i++){
+                // Need to slice because 2nd argument needs to be an array
+                tmp_rlist = filterName(rlist,roilist.slice(i,i+1));
+                if (dbgflg) VQ.debug(roilist[i] + '    ' + tmp_rlist[0].filename)
+                // tmp_rlist should now only be the roi_obj that have roilist[i] in it
+                tmp_latest = find_latest_roi(tmp_rlist);
+                edit = false;
+                for (var j =0; j < frois.length; j++){
+                    if (tmp_latest.filename == frois[j].filename)
+                    {
+                        froilist[j].push(roilist[i])
+                        edit = true;
+                    }
+                }
+                if (!edit){
+                    frois.push(tmp_latest);
+                    tmp = new Array();
+                    tmp.push(roilist[i]);
+                    froilist.push(tmp);
+                }
+                if (frois.length != froilist.length)
+                    VQ.suspend('Something happened....');
+            }
+            // Print
+            if (dbgflg){
+                VQ.debug('froilist[i]')
+                VQ.debug('frois[i].filename');
+                for (var i = 0; i < frois.length; i++){
+                    VQ.debug(froilist[i])
+                    VQ.debug(frois[i].filename)
+                }
+            }
+
+            // Assuming the filter worked, we now hoave arrays of filenames to download, with associated ROIs to keep
+            VQ.mainWin().setViewMode('Slice View','3D ROI Tool');
+            var roi = VQ.currentOp();
+            // Start off by removing all rois
+            while (roi.numROIs() > 1)
+                roi.deleteROI(1,0);
+
+            var wd = VQ.webDisk(this.repository_url)
+
+            // Time to get started
+            for (var i = 0 ; i< frois.length; i++){
+                var roifile = frois[i].filename;
+                
+                if (dbgflg) VQ.debug(roifile);
+                //if (!roifile.match("^/")){
+                if (roifile.slice(0,1) != '/'){
+                    roifile = '/projects' + this.dcmRep.project() + '/' + roifile;
+                }
+                var resGet = wd.get(roifile,path);
+
+                // Ignore the background so total number of ROIs will beour starting point
+                var curridx = roi.numROIs();
+                roi.mergeROIs(path);
+                // This should increase the number of rois
+                roi_names_we_want = froilist[i];
+                if (exactlist) {
+                    // Okay now we remove the extras
+                    while (curridx < roi.numROIs()){
+                        // Simplified form-- if the name exists, in the string, keep it. Else delete
+                        stats = roi.getROIDetails(curridx);
+                        if (hasstr(stats[0],roi_names_we_want)){
+                            curridx++;
+                        }
+                        else {
+                            roi.deleteROI(curridx,0);
+                        }
+                    }
+                }
+            }
+
+
+            // End merge script
+        }
+        catch (error){
+            this.showError(error,'mergeROIs()')
+        }
+    }
+
+    // Returns webdisk object for current directory
+    this.getWebDisk = function(){
+        return VQ.webDisk(this.repository_url);
+    }
+
+    // Note: inputs have to be turned on in order for the ROIs to be submitted
+    this.submitROIs = function(){
+        try{
+            var dm = VQ.dataManager();
+            var mw = VQ.mainWin();
+            mw.setViewMode("Slice View",'3D ROI Tool');
+            var roi = VQ.currentOp();
+            // Set repository
+            // Will upload for all inputs in the datamanager
+            var i = 0;
+            while(dm.hasData(i)){
+                var dispName = this.dcmRep.get('displayedName');
+                if (dispName && dispName.length) {
+                    dm.setDesc(i,"__repository",dispName);
+                } else {
+                    dm.setDesc(i,"__repository","VQScriptRep");
+                }
+                dm.setDesc(i,"__repository_url",this.repository_url);
+                dm.setDesc(i,"__project",this.project);
+                i++;
+            }
+            roi.submitROI(true);
+        }
+        catch(error){
+            this.showError(error,'submitROIs'); 
+        }
+    }
+
+    // Submits the image at id to the ipacs repository
+    this.submitData = function(id){
+        try{
+            var dm = VQ.dataManager();
+            if (!dm.hasData(id)) throw "No image is loaded at index " + id + '.';
+
+            var dispName = this.dcmRep.get('displayedName');
+            if (dispName && dispName.length) {
+                dm.setDesc(id,"__repository",dispName);
+            } else {
+                dm.setDesc(id,"__repository","VQScriptRep");
+            }
+            dm.setDesc(id,"__repository_url",this.repository_url);
+            dm.setDesc(id,"__project",this.output_p);
+
+            var res = VQ.storeData(this.dcmRep,id);
+            if (res != 0) throw "submitData has failed with error " + res + " (" + this.dcmRep.takeError() + ").";
+        }
+        catch(error){
+            this.showError(error,'submitData');
+        }
+        
+    }
+
+    // Function to get injectedDose from the iPACS subject information data point
+    this.getInjectedDose = function(id){
+        try{
+            var dm = VQ.dataManager();
+            if (!dm.hasData(id)) throw "No image is loaded at index " + id + '.';
+
+            // Query data point subject information
+            var uid = dm.getDesc(id,'seriesinstanceuid');
+            var res = VQ.queryDataPoints(this.dcmRep,'series',uid,'SubjectInformation');
+            if (res.length < 1) return -1;
+
+            inj = res[0]['injecteddose'];
+            if (inj == undefined) {
+                if (dbgflg) VQ.debug("injected dose datapoint not entered");
+                return -1;
+            }
+            // find the tail
+            tail = res[0]['tailUptake'];
+            if (tail == undefined || tail == '')
+                tail=0;
+            else
+                tail = parseFloat(tail);
+            
+            if (dbgflg) VQ.debug('Subtracting a tail uptake of ' + tail + ' uCi from the injected dose uptake of ' + inj + ' uCi.');
+
+            return inj-tail;
+        }
+        catch(error){
+            this.showError(error,'getInjectedDose')
+        }
+
+    }
+
+
+    // Function to get time point from the iPACS subject information data point
+    this.getTimePoint = function(id){
+        try{
+            var dm = VQ.dataManager();
+            if (!dm.hasData(id)) throw "No image is loaded at index " + id + '.';
+
+            // Query data point subject information
+            var uid = dm.getDesc(id,'seriesinstanceuid');
+            var res = VQ.queryDataPoints(this.dcmRep,'series',uid,'SubjectInformation');
+            if (res.length < 1) return -1;
+
+            tm = res[0]['Timepoint'];
+            if (tm == undefined) {
+                if (dbgflg) VQ.debug("time point datapoint not entered");
+                return -1;
+            }
+
+            return tm;
+        }
+        catch(error){
+            this.showError(error,'getTimePoint')
+        }
+
+    }
+
+    // Function to get SubjectID from the iPACS subject information data point
+    this.getSubjectID = function(id){
+        try{
+            var dm = VQ.dataManager();
+            if (!dm.hasData(id)) throw "No image is loaded at index " + id + '.';
+
+            // Query data point subject information
+            var uid = dm.getDesc(id,'seriesinstanceuid');
+            var res = VQ.queryDataPoints(this.dcmRep,'series',uid,'SubjectInformation');
+            if (res.length < 1) return -1;
+
+            id = res[0]['SubjectID'];
+            if (id == undefined) {
+                if (dbgflg) VQ.debug("Subject ID datapoint not entered");
+                return -1;
+            }
+
+            return id;
+        }
+        catch(error){
+            this.showError(error,'getSubjectID')
+        }
+
+    }
+
+    // Function to get Group from the iPACS subject information data point
+    this.getGroup= function(id){
+        try{
+            var dm = VQ.dataManager();
+            if (!dm.hasData(id)) throw "No image is loaded at index " + id + '.';
+
+            // Query data point subject information
+            var uid = dm.getDesc(id,'seriesinstanceuid');
+            var res = VQ.queryDataPoints(this.dcmRep,'series',uid,'SubjectInformation');
+            if (res.length < 1) return -1;
+
+            id = res[0]['Group'];
+            if (id == undefined) {
+                if (dbgflg) VQ.debug("Group datapoint not entered");
+                return -1;
+            }
+
+            return id;
+        }
+        catch(error){
+            this.showError(error,'getGroup')
+        }
+
+    }
+
+
+    // Function to get Weight (g) from the iPACS subject information data point
+    this.getWeight= function(id){
+        try{
+            var dm = VQ.dataManager();
+            if (!dm.hasData(id)) throw "No image is loaded at index " + id + '.';
+
+            // Query data point subject information
+            var uid = dm.getDesc(id,'seriesinstanceuid');
+            var res = VQ.queryDataPoints(this.dcmRep,'series',uid,'SubjectInformation');
+            if (res.length < 1) return -1;
+
+            id = res[0]['weight'];
+            if (id == undefined) {
+                if (dbgflg) VQ.debug("weight datapoint not entered");
+                return -1;
+            }
+
+
+            return id;
+        }
+        catch(error){
+            this.showError(error,'getWeight')
+        }
+
+    }
+
+    
+    // Function to get all quantification datapoints for a given dataManager index
+    this.getQuantification = function(){
+        try{
+            if (arguments.length ==0)
+                var id = 0;
+            else
+                var id = arguments[0];
+            var dm = VQ.dataManager();
+            if (!dm.hasData(id)) throw "No image is loaded at index " + id + '.';
+
+            var uid = dm.getDesc(id,'sopinstanceuid');
+            var res = VQ.queryDataPoints(this.dcmRep,'images',uid,'quantification');
+
+            return res
+        }
+        catch(error){
+            this.showError(error,'getQuantification');
+        }
+    }
+
+    
+
+
+
+
+
+// End of ipacs object
+}
+
+// Helper funcions
+//
+//
+
+// Function to emulate bash style * wildcard
+function wildcardMatch(str,pattern){
+    // Break the pattern up by '*' 
+    pat = pattern.split('*');
+    //VQ.debug('pat: ' + pat);
+    var idx = 0;
+    for (var i = 0; i < pat.length; i++){
+        // If the first character is *
+        if (pat[i] == '')
+            continue;
+        var tmp = str.indexOf(pat[i]);
+        // tmp must be 0 on the first run if we didn't start with a *
+        if (i == 0 && tmp != 0)
+            return false;
+        // tmp is found where we want
+        if (tmp >= idx)
+        {   
+            idx = tmp + pat[i].length;
+        }
+        // tmp not found
+        else
+            return false;
+    }
+    // Last character has to be a *, or we need to get all the way to the end of the string
+    if (pat[pat.length-1] == '' || idx == str.length)
+        return true;
+    else
+        return false;
+}
+
+
+// String matching function
+// Returns true if str matches any element of strlist (array)
+function containsstr(str,strlist){
+    for (var i = 0; i < strlist.length; i++){
+        if (str == strlist[i]){
+            return true;
+        }
+    }
+    return false;
+}
+
+
+// Same as containsstr, but doesn't need to match exactly  
+function hasstr(str,strlist){
+    for (var i = 0; i < strlist.length; i++){
+        if (strlist[i].indexOf(str) > -1)
+            return true;
+    }
+    return false;
+}
+function findLastInput(dataman){
+    var idx = 0;
+    while (dataman.hasData(idx)){
+        idx ++;
+    }
+    return idx;
+}
+
+// This is depreciated for find_latest_roi
+function find_latest(res) { //find the latest timestamp for each unique roi
+    var ids = []
+    for (r in res) {
+        
+        ids.push(res[r]["roiid"]);
+    }
+    var uids = unique(ids);
+    var resfinal = [];
+    var ts = new Date();
+    for (u in uids) {
+        ts.setFullYear(2000,0,0);
+        for (r in res) {
+        if (res[r]["roiid"] == uids[u]){
+           var timestamp = convert_date(res[r]["timestamp"]);
+               if (timestamp > ts){
+              var ts = timestamp;
+              resfinal.push(res[r]);
+           }
+        }
+    }
+    }
+    return resfinal;
+}           
+
+// Returns all unique elements in an array
+function unique(origArr) {  
+    var newArr = [],  
+        origLen = origArr.length,  
+        found,  
+        x, y;  
+  
+    for ( x = 0; x < origLen; x++ ) {  
+        found = undefined;  
+        for ( y = 0; y < newArr.length; y++ ) {  
+            if ( origArr[x] === newArr[y] ) {  
+              found = true;  
+              break;  
+            }  
+        }  
+        if ( !found) newArr.push( origArr[x] );  
+    }  
+   return newArr;  
+}
+
+// Keep this
+function convert_date(stamp){ //convert the timestamp, stored as a str in the iPACS, into a JS date obj
+    if (stamp.indexOf('T') > -1)
+        var datetime = stamp.split("T");
+    else
+        var datetime = stamp.split(" ");
+    var fulldate = datetime[0].split("-");
+    var fulltime = datetime[1].split(":");
+    var d = new Date(
+        fulldate[0], 
+        parseFloat(fulldate[1])-1, 
+        fulldate[2], 
+        fulltime[0], 
+        fulltime[1], 
+        fulltime[2]);
+     
+    return d;
+}
+
+
+// Gabe's sort functions used for sorting incoming data
+/**
+ * Convenience sort function for strings
+ */ 
+function stringSort(a, b) {
+	if (a < b) {
+		return -1;
+	} else if (a > b) {
+		return 1;
+	} else {
+		return 0;
+	}
+}
+
+// Function to filter out dates either older or newer than fdate. Takes array of studies
+// if older, returns studies before date
+// if !older, returns studies after date
+function filtDates(studies,fdate,older){
+    // fdate is a string YYYYMMDD (guraranteed in parent fn)
+    yr = fdate.slice(0,4);
+    mo = parseFloat(fdate.slice(4,6))-1;
+    da = fdate.slice(6);
+    //VQ.debug('yr:' + yr + ' mo:' + mo + ' da:' + da);
+    d = new Date(yr,mo,da,0,0,0,0);
+    var studies_out = new Array();
+    for (var i = 0; i < studies.length; i++){
+        sdate = studies[i].StudyDate;
+        yr = sdate.slice(0,4);
+        mo = parseFloat(sdate.slice(4,6))-1;
+        da = sdate.slice(6);
+        d2 = new Date(yr,mo,da,0,0,0,0);
+        //VQ.debug('yr:' + yr + ' mo:' + mo + ' da:' + da);
+        if (d2 > d && !older) // Its more recent
+            studies_out.push(studies[i]);
+        else if (d2 < d && older) // Its older
+            studies_out.push(studies[i]);
+        
+    }
+    return studies_out;
+}
+
+// Function to filter out dates either older or newer than fdate. Takes array of studies
+// if older, returns studies before date
+// if !older, returns studies after date
+function filtDates_roi(studies,fdate,older){
+    // fdate is a string YYYYMMDD (guraranteed in parent fn)
+    yr = fdate.slice(0,4);
+    mo = parseFloat(fdate.slice(4,6))-1;
+    da = fdate.slice(6);
+    //VQ.debug('yr:' + yr + ' mo:' + mo + ' da:' + da);
+    d = new Date(yr,mo,da,0,0,0,0);
+    var studies_out = new Array();
+    for (var i = 0; i < studies.length; i++){
+        sdate = studies[i].timestamp;
+        yr = sdate.slice(0,4);
+        mo = parseFloat(sdate.slice(4,6))-1;
+        da = sdate.slice(6);
+        d2 = new Date(yr,mo,da,0,0,0,0);
+        //VQ.debug('yr:' + yr + ' mo:' + mo + ' da:' + da);
+        if (d2 > d && !older) // Its more recent
+            studies_out.push(studies[i]);
+        else if (d2 < d && older) // Its older
+            studies_out.push(studies[i]);
+        
+    }
+    return studies_out;
+}
+    
+
+
+
+// Custom sort function that calls a specific sort function. Useful becuase of how javascripts sort() method works-- the input is specific
+function sortList(list,prop){
+    switch (prop) {
+        case "PatientsName":
+            list.sort(nameSort);
+            break
+        case "PatientID":
+            list.sort(idSort);
+            break;
+        case "StudyDate":
+            list.sort(timeSort);
+            break;
+        case "StudyTime":
+            list.sort(timeSort);
+            break;
+        default:
+            list.sort(seriesSort);
+    }
+    return list;
+}
+
+
+// Sort by patients name
+function nameSort(a,b){
+    var idA = a['PatientsName'];
+    var idB = b['PatientsName'];
+    return stringSort(idA,idB);
+}
+// Sort by patient id
+function idSort(a,b){
+    var idA = a['PatientID'];
+    var idB = b['PatientID'];
+    return stringSort(idA,idB);
+}
+
+// Sort by series description
+function descSort(a,b){
+    var idA = a['SeriesDescription'];
+    var idB = b['SeriesDescription'];
+    return stringSort(idA,idB);
+}
+
+
+// Sort by time
+function timeSort(a,b){
+    var ta = a.StudyDate + a.StudyTime;
+    var tb = b.StudyDate + b.StudyTime;
+    return stringSort(ta,tb);
+}
+
+
+
+/**
+ * Convenience sort function for iPACS data
+ * Sorts series by default
+ */
+function seriesSort(a, b) {
+	// Modality
+	var modPriority = [ "CT", "MR", "NM", "PT", "AT" ];
+	var idA = modPriority.indexOf(a.Modality);
+	var idB = modPriority.indexOf(b.Modality);
+	if (idA !== idB) {
+		return idA - idB;
+	}
+
+	// Patient ID
+	if (a.PatientID !== b.PatientID) {
+		return stringSort(a.PatientID, b.PatientID);
+	}
+
+	// Patient Name
+	if (a.PatientsName !== b.PatientsName) {
+		return stringSort(a.PatientsName, b.PatientsName);
+	}
+
+	// Series time
+	var timeA = a.SeriesDate + a.SeriesTime;
+	var timeB = b.SeriesDate + b.SeriesTime;
+	if (timeA !== timeB) {
+		return stringSort(timeA, timeB);
+	}
+
+	// Series name
+	if (a.SeriesDescription !== b.SeriesDescription) {
+		return stringSort(a.SeriesDescription, b.SeriesDescription);
+	}
+}
+
+// get ROI helper methods
+
+// Given a list of roi objects, filter out all ones that don't contain AT LEAST all elements in roilist (list of roi names)
+function filterName(rlist,roilist){
+    var rlist_final = new Array();
+    for (var i = 0; i < rlist.length ; i ++){
+        var nlist = rlist[i].names;
+        var found_roi = true;
+        for (var j = 0 ; j < roilist.length; j ++){
+            if (nlist.indexOf(roilist[j]) > -1)
+                continue;
+            else
+                found_roi = false;
+        }
+        if (found_roi)
+            rlist_final.push(rlist[i]);
+    }
+
+    return rlist_final;
+}
+
+// Given a list of roi objects, filter out all ones that weren't created by cname
+function filterCreator(rlist,cname){
+    var rlist_final = new Array();
+    for (var i = 0; i < rlist.length; i++){
+        if (wildcardMatch(rlist[i].creator,cname))
+            rlist_final.push(rlist[i]);
+    }
+    return rlist_final;
+}
+
+function find_latest_roi(res) { //find the latest timestamp for each unique roi
+    var resfinal = res[0]; 
+    var ts = new Date();
+    ts.setFullYear(2000,0,0);
+    for (r in res) {
+        var timestamp = convert_date(res[r]["timestamp"]);
+        if (timestamp > ts){
+            var ts = timestamp;
+            resfinal = res[r];
+        }
+        
+    }
+    return resfinal;
+}
+
+// Helper declaration to create an roi object
+// Not sure if this is overkill, but prefer it this way
+// Possibly have constructor take filename as argument -- should be unique for each roi object
+function roi_obj(filename){
+    this.creator = '';
+    this.timestamp = '';
+    this.filename = filename;
+    this.names = [];
+    this.setid = '{}';
+}
+// End of file
+
+
+
