@@ -8,17 +8,7 @@ mw.setViewMode('Slice View','Navigation');
 
 // pause sctipt to allow user to load everything in -> wait for them to say "ok"
 VQ.suspend('Load in dataset(s), ok when done',false);
-var tmp = String(VQ.currentDcmRep());
-tmp = tmp.replace('ipacs://:@','ipacss://');
-var port = tmp.match(/:\d+/g);
-tmp = tmp.replace(port,'');
-var url = tmp.slice(0,tmp.indexOf('/customers'));
-var proj = tmp.slice(tmp.indexOf('/customers'),tmp.length+1);
-var repo = new iPACS(url,proj);
 
-
-
-//for now, assume they loaded same number of PT/NM as CT data sets
 var nSeries = dm.size();
 // set all the CTS to gray scale
 //set all the PT/NMs to nih_fire2 
@@ -121,16 +111,25 @@ function fixRanges(){
 }
 
 function setUnits(){
+       
         var unit = VQ.getValues('NM Units',{'Unit':['%ID/g','SUV']},true);
+        var tmp = String(VQ.currentDcmRep());
+        var port = tmp.match(/:\d+/g);
+        tmp = tmp.replace('ipacs://:@','ipacss://').replace(port,'');
+        var url = tmp.slice(0,tmp.indexOf('/customers'));
+        var proj = tmp.slice(tmp.indexOf('/customers'),tmp.length+1);
+        var repo = new iPACS(url,proj);
         if (unit['Unit']=='%ID/g'){
             for (var k = 0; k < nSeries; k++){
                 if (dm.getDesc(VQ.index(k),'Modality') != 'CT'){
                     var injDose = repo.getInjectedDose(VQ.index(k));
                     if (injDose==-1) {
-                        var strErr = 'Injected dose not found for index ' + k.toString() + '\nPlease input manually'
-                        var dose = VQ.getValues(strErr,{'Injected Dose':'text'},false);
+                        var idErr = 'ID not found for index ' + k.toString() + '. Please input manually'
+                        var dose = VQ.getValues(idErr,{'Injected Dose':'text'},false);
                         injDose = parseFloat(dose['Injected Dose']);}
-                    preProcessWrapper('-convert', '%ID/g', '-injdose', injDose + ' uCi');
+                    else {injDose = injDose;}
+                    VQ.showMessage(injDose)
+                    convertToPIDG(VQ.index(k),injDose);
                 }
             
             }
@@ -141,125 +140,40 @@ function setUnits(){
                 if (dm.getDesc(VQ.index(k),'Modality') != 'CT'){
                     var injDose = repo.getInjectedDose(VQ.index(k));
                     if (injDose==-1) {
-                        var dose = VQ.getValues('Injected dose not found. \nPlease input manually',{'Injected Dose':'text'},false);
+                        var idErr = 'ID not found for index ' + k.toString() + '. Please input manually'
+                        var dose = VQ.getValues(idErr,{'Injected Dose':'text'},false);
                         injDose = parseFloat(dose['Injected Dose']);
                         }
+                    else {injDose = injDose;}
                     var wt = repo.getWeight(VQ.index(k));
                     if (wt==-1) {
-                        var weight = VQ.getValues('Weight not found.Please input manually',{'Weight':'text'},false);
+                        var wtErr = 'Weight not found for index ' + k.toString() + '. Please input manually'
+                        var weight = VQ.getValues(wtErr,{'Weight':'text'},false);
                         wt = parseFloat(weight['Weight']);
                         }
-                        preProcessWrapper('-convert', 'SUV', '-injdose', injDose + ' uCi','-weight', wt + ' g');
+                    else {wt = wt;}
+                    convertToSUV(VQ.index(k),injDose,wt);
                 }
                 
         }
     }
 }
 
-function preProcessWrapper(){
-    // defaults
-    options = {'autoCrop':'false',
-               'bedRemoval':'false',
-               'calibFactor':'false',
-               'calibFactorValue':'NM=1 uCi',
-               'coRegister':'false',
-               'coRegisterFast':'false',
-               'coRegisterVersor':'false',
-               'comment':'false',
-               'commentText':'pre-p',
-               'convertUnit':'false',
-               'convertUnitUnit':'uCi',
-               'injDose':'0 MBq',
-               'qualityControl':'false',
-               'resample':'false',
-               'resampleVoxSize':'1.0',
-               'storeData':'false',
-               'weight':'0 g'
-    };
+function convertToPIDG(idx,dose){
+    var mw = VQ.mainWin();
+    var dm = VQ.dataManager();
+    // get voxel size
+    var vox_size = dm.voxelSizeX() * dm.voxelSizeY() * dm.voxelSizeZ();
+    mw.setViewMode('Slice View','Arithmetics');
+    VQ.currentOp().multScalar(idx,100*1000/dose/vox_size);
+}
 
-    try{
-        var i = 0
-        while (i < arguments.length){
-            switch(arguments[i]){
-                case "-ctbedremoval":
-                    options['bedRemoval'] = 'true';
-                    i++;
-                    break;
-                case "-coregister":
-                    options['coRegister'] = 'true';
-                    i++;
-                    break;
-                case "-coregisterfast":
-                    options['coRegisterFast'] = 'true';
-                    i++;
-                    break;
-                case "-coregisterversor":
-                    options['coRegisterVersor'] = 'true';
-                    i++;
-                    break;
-                case "-autocrop":
-                    options['autoCrop'] = 'true';
-                    i++;
-                    break
-                case "-calibfactor":
-                    options['calibFactor'] = 'true';
-                    options['calibFactorValue'] = arguments[i+1];
-                    i += 2;
-                    break;
-                case "-resample":
-                    options['resample'] = 'true';
-                    options['resampleVoxSize'] = arguments[i+1];
-                    i += 2;
-                    break;
-                case "-convert":
-                    options['convertUnit'] = 'true';
-                    options['convertUnitUnit'] = arguments[i+1];
-                    i += 2;
-					
-					
-					//check for unk
-					for (var zz = 0; zz<dm.size(); zz++){
-						if (dm.getDesc(VQ.index(zz),'Units').toLowerCase()=='unk'){
-							VQ.showMessage('UNK units in index '+zz.toString()+'.\nConversion will not apply.')
-						}
-					}
-					
-                    break;
-                case "-weight":
-                    options['weight'] = arguments[i+1];
-                    i+=2;
-                    break;
-                case "-injdose":
-                    options['injDose'] = arguments[i+1];
-                    i +=2;
-                    break;
-                case "-desc":
-                    options['comment'] = 'true';
-                    options['commentText'] = arguments[i+1];
-                    i +=2;
-                    break;
-                case "-qc":
-                    options['qualityControl'] = 'true';
-                    i++;
-                    break;
-                case "-store":
-                    options['storeData'] = 'true';
-                    i++;
-                    break;
-                default:
-                    VQ.debug(sprintf('Argument %s not supported...ignoring',arguments[i]));
-                    i++;
-            } 
-        }
-    }
-    catch (err){
-        VQ.debug("Preprocess Wrapper Error: "+ err);
-    }
-    // Do actual script
-    var opt_array = new Array();
-    for (var i in options)
-        opt_array.push(i+'='+options[i]);
-    var output = opt_array.join('|');
-    VQ.preProcess(output);
-    return output;
+function convertToSUV(idx,dose,weight){
+    var mw = VQ.mainWin();
+    var dm = VQ.dataManager();
+    // get voxel size
+    var vox_size = dm.voxelSizeX() * dm.voxelSizeY() * dm.voxelSizeZ();
+    mw.setViewMode('Slice View','Arithmetics');
+    VQ.currentOp().multScalar(idx,weight*1000/(vox_size*dose));
+
 }
