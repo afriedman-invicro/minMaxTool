@@ -1,16 +1,42 @@
-// clear all loaded data
+/*
+Script that allows user to load studies and interactively set the range for reference/input
+across all studies. Each input series is put in a separate panel, and the reference
+gets matched for easy viewing.
+
+Currently supports CT/SPECT/PT and WL/BLI/FLI
+
+Ahuva Friedman <afriedman@invicro.com> 2023
+
+*/
+
+// vqs variables
 var dm = VQ.dataManager();
 var mw = VQ.mainWin();
 var mm = VQ.minMaxTool();
+// clear all loaded data
 dm.unloadData(VQ.index(0),-1);
 mw.setViewMode('Slice View','Navigation');
 
 // pause sctipt to allow user to load everything in -> wait for them to say "ok"
 VQ.suspend('Load in dataset(s), ok when done',false);
 
+
+// make sure modalities loaded are supported
 var nSeries = dm.size();
-// set all the CTS to gray scale
-//set all the PT/NMs to nih_fire2 
+var supportedMods = ['CT','NM','PT','IM','BLI','FLI'];
+for (var j = 0; j < nSeries; j++){
+    var mod = dm.getDesc(VQ.index(j),'Modality');
+    if (supportedMods.indexOf(mod) == -1){
+        VQ.showMessage(mod + ' is currently not supported');
+        VQ.abort();
+        break;
+    }
+}
+
+// check if studies are CT/NM/PT or MI/BLI/FLI
+var testMod = dm.getDesc(VQ.index(0),'Modality');
+var isCT = supportedMods.indexOf(testMod) < 3;
+
 
 var convUnits = VQ.askYesNoQuestion('Convert units?',false);
 if (convUnits){
